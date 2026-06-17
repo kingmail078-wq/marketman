@@ -1,0 +1,221 @@
+//@version=5
+// Compatibility notes:
+// - TradingView Pine Script v5 only
+// - Built for webhook-ready alert() payloads for automated order routers
+// - Logic is structured for Tradovate / TradeLocker adaptation via webhook bridge
+// - Indicator version available for execution platforms that require proprietary DOM/delta feeds
+strategy("Marketman Intraday Profile + Order Flow Strategy", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=100000, currency=currency.USD, calc_on_every_tick=true, pyramiding=1)
+
+// --- Market-specific constants ------------------------------------------------
+var string SYMBOL_ROOT = syminfo.root_symbol
+bool isES = str.contains(SYMBOL_ROOT, "ES")
+bool isNQ = str.contains(SYMBOL_ROOT, "NQ")
+
+float tickSize = isES or isNQ ? 0.25 : syminfo.mintick
+float tickValue = isES ? (str.contains(SYMBOL_ROOT, "M") ? 5.0 : 50.0) : isNQ ? (str.contains(SYMBOL_ROOT, "M") ? 0.5 : 20.0) : 1.0
+string marketLabel = isES ? "ES" : isNQ ? "NQ" : SYMBOL_ROOT
+
+// --- DOM Bias Parameters ---------------------------------------------------
+float domAggThresh = input.float(0.60, "DOM Aggression Threshold")
+int deltaRisingBars = input.int(3, "Delta Rising Bars")
+int deltaFallingBars = input.int(3, "Delta Falling Bars")
+
+// --- Session and phase configuration ----------------------------------------
+string nySession = "0930-1600"
+string lunchSession = "1130-1330"
+string pmSession = "1530-1600"
+
+bool inSession = not na(time(timeframe.period, nySession, "America/New_York"))
+bool inLunch = not na(time(timeframe.period, lunchSession, "America/New_York"))
+bool inPM = not na(time(timeframe.period, pmSession, "America/New_York"))
+
+bool sessionOpen = inSession and not inSession[1]
+
+// --- Institutional Session Timing (ET) ----------------------------------------
+f_inTime(startH, startM, endH, endM) =>
+    t = time("America/New_York", time)
+    t >= timestamp("America/New_York", year, month, day, startH, startM) and
+    t <  timestamp("America/New_York", year, month, day, endH, endM)
+
+bool nyOpen = f_inTime(9, 30, 10, 0)      // High vol, imbalance resolution
+bool morning = f_inTime(10, 0, 11, 30)    // Trend continuation or first reversal
+bool lunch = f_inTime(11, 30, 13, 30)     // Low vol, mean-reversion, avoid breakouts
+bool pmAccum = f_inTime(13, 30, 14, 30)   // Positioning for afternoon move
+bool pmTrend = f_inTime(14, 30, 16, 0)    // Strongest directional move of day
+
+// --- Previous day anchors ----------------------------------------------------
+float pdh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
+float pdl = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_off)
+
+// --- Session-level VWAP / EMA / RSI ----------------------------------------
+float sessionVWAP = ta.vwap(close)
+int length = 20
+float mult = 1.0
+float dev = mult * ta.stdev(close, length)
+float vwapUpper = sessionVWAP + dev
+float vwapLower = sessionVWAP - dev
+float atr14 = ta.atr(14)
+float rsi14 = ta.rsi(close, 14)
+
+bool lowVolatility = atr14 < ta.sma(atr14, 20) * 0.75
+int rsiUpper = lowVolatility ? 60 : 70
+int rsiLower = lowVolatility ? 40 : 30
+
+// --- Volume Profile (Session POC/VAH/VAL) --------------------------------
+vp_res = request.volume_profile(syminfo.tickerid, session.regular, bar_index)
+float sessionPOC = vp_res.poc_price
+float sessionVAH = vp_res.vah
+float sessionVAL = vp_res.val
+
+// --- Delta & Order Flow Proxies ------------------------------------------
+float delta = volume * math.sign(close - open)
+float bidPressure = volume * (open > close ? 1 : 0)
+float askPressure = volume * (close > open ? 1 : 0)
+float pressureTotal = bidPressure + askPressure
+float buyAggression = pressureTotal > 0 ? askPressure / pressureTotal : 0.0
+float sellAggression = pressureTotal > 0 ? bidPressure / pressureTotal : 0.0
+
+bool longAggression = buyAggression > domAggThresh
+bool shortAggression = sellAggression > domAggThresh
+
+bool deltaUp = ta.rising(delta, deltaRisingBars)
+bool deltaDown = ta.falling(delta, deltaFallingBars)
+
+bool longImbalance = askPressure > bidPressure * 1.5
+bool shortImbalance = bidPressure > askPressure * 1.5
+
+bool domLongBias = longAggression or deltaUp or longImbalance
+bool domShortBias = shortAggression or deltaDown or shortImbalance
+
+// Delta divergence for exits
+bool deltaDivergeLong = high > high[1] and delta < delta[1]
+bool deltaDivergeShort = low < low[1] and delta > delta[1]
+
+var float cumDelta = 0.0
+cumDelta := inSession ? nz(cumDelta[1]) + delta : 0.0
+bool deltaBullish = cumDelta > nz(cumDelta[1])
+bool deltaBearish = cumDelta < nz(cumDelta[1])
+
+// --- VWAP bounce and deviation conditions --------------------------------
+bool longVWAPBounce = close > sessionVWAP and low <= sessionVWAP
+bool shortVWAPBounce = close < sessionVWAP and high >= sessionVWAP
+bool longVWAPDev = close <= vwapLower
+bool shortVWAPDev = close >= vwapUpper
+
+// --- POC sweep conditions ------------------------------------------------
+bool longPOCSweep = low < sessionPOC and close > sessionPOC
+bool shortPOCSweep = high > sessionPOC and close < sessionPOC
+
+// --- Value area rotation conditions --------------------------------------
+bool longVALtoVAH = close > sessionVAL and close < sessionVAH and close > open
+bool shortVAHtoVAL = close < sessionVAH and close > sessionVAL and close < open
+
+// --- Confluence scoring (VWAP + POC/VA + DOM bias)
+int confluenceLong = (longVWAPBounce ? 1 : 0) + (longVWAPDev ? 1 : 0) + (longPOCSweep ? 2 : 0) + (longVALtoVAH ? 1 : 0) + (domLongBias ? 2 : 0)
+int confluenceShort = (shortVWAPBounce ? 1 : 0) + (shortVWAPDev ? 1 : 0) + (shortPOCSweep ? 2 : 0) + (shortVAHtoVAL ? 1 : 0) + (domShortBias ? 2 : 0)
+
+// --- Liquidity sweep definitions -------------------------------------------
+bool sweepLong = low < sessionVAL and close > sessionVAL and deltaBullish
+bool sweepShort = high > sessionVAH and close < sessionVAH and deltaBearish
+bool sweepPDRLong = low < pdl and close > pdl and deltaBullish
+bool sweepPDRShort = high > pdh and close < pdh and deltaBearish
+
+// --- Session phase markers --------------------------------------------------
+int nyHour = hour(time, "America/New_York")
+int nyMinute = minute(time, "America/New_York")
+bool openPhase = inSession and nyHour == 9 and nyMinute >= 30 and nyMinute < 45
+bool pmPhase = inSession and nyHour == 15 and nyMinute >= 30 and nyMinute < 45
+
+bool rsiLongOK = rsi14 < 40
+bool rsiShortOK = rsi14 > 60
+
+// --- Price proximity checks -----------------------------------------------
+float tolATR = atr14 * 0.5
+bool priceAtVAL = close >= sessionVAL - tolATR and close <= sessionVAL + tolATR
+bool priceAtVAH = close >= sessionVAH - tolATR and close <= sessionVAH + tolATR
+bool priceAtVWAPLower = close >= vwapLower - tolATR and close <= vwapLower + tolATR
+bool priceAtVWAPUpper = close >= vwapUpper - tolATR and close <= vwapUpper + tolATR
+
+// --- Confluence-based entry logic (DOM bias REQUIRED + session phase)
+// Long: VAL/VWAP-/POC + RSI<40 + DOM bullish + Open/PM
+// Short: VAH/VWAP+/POC + RSI>60 + DOM bearish + Open/PM
+bool longEntry = inSession and (openPhase or pmPhase) and confluenceLong >= 3 and rsiLongOK and domLongBias and (priceAtVAL or priceAtVWAPLower or longPOCSweep) and not inLunch
+bool shortEntry = inSession and (openPhase or pmPhase) and confluenceShort >= 3 and rsiShortOK and domShortBias and (priceAtVAH or priceAtVWAPUpper or shortPOCSweep) and not inLunch
+
+// --- Exit Conditions (DOM exhaustion, absorption, flip) --------------------
+// Delta divergence: price new high but delta lower (exhaustion)
+bool deltaDivergeLong = high > high[1] and delta < delta[1]
+bool deltaDivergeShort = low < low[1] and delta > delta[1]
+
+// DOM bias flip tracking (fail-safe exit if bias flips for N consecutive bars)
+var int flipCounterLong = 0
+var int flipCounterShort = 0
+int flipThreshold = input.int(2, "DOM Flip Bars Before Exit")
+
+flipCounterLong := strategy.position_size > 0 and domShortBias ? nz(flipCounterLong) + 1 : 0
+flipCounterShort := strategy.position_size < 0 and domLongBias ? nz(flipCounterShort) + 1 : 0
+
+bool exitLongByFlip = flipCounterLong >= flipThreshold
+bool exitShortByFlip = flipCounterShort >= flipThreshold
+
+// Exit triggers
+bool exitLong = deltaDivergeLong or exitLongByFlip or (strategy.position_size > 0 and inLunch)
+bool exitShort = deltaDivergeShort or exitShortByFlip or (strategy.position_size < 0 and inLunch)
+
+// Stop tightening on DOM exhaustion
+float tightenedStopLong = exitLong ? math.max(close - atr14 * 0.5, sessionVAL) : na
+float tightenedStopShort = exitShort ? math.min(close + atr14 * 0.5, sessionVAH) : na
+float riskPct = 0.01
+float riskDollars = strategy.equity * riskPct
+float stopBuffer = tickSize * 2
+float longStop = math.max(close - atr14 * 1.1, sessionVAL - stopBuffer)
+float shortStop = math.min(close + atr14 * 1.1, sessionVAH + stopBuffer)
+float longRiskPts = math.max(0.25, close - longStop)
+float shortRiskPts = math.max(0.25, shortStop - close)
+int longQty = math.max(1, int(math.floor(riskDollars / (longRiskPts * tickValue))))
+int shortQty = math.max(1, int(math.floor(riskDollars / (shortRiskPts * tickValue))))
+
+float profitTargetLong = close + longRiskPts * 2.0
+float profitTargetShort = close - shortRiskPts * 2.0
+
+// --- Entry / exit execution -------------------------------------------------
+if longEntry and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long, qty=longQty, comment="LongEntry")
+    strategy.exit("LongExit", from_entry="Long", stop=longStop, limit=profitTargetLong)
+    alert('{"event":"LongEntry","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, format.mintick) + ',"stop":' + str.tostring(longStop, format.mintick) + ',"target":' + str.tostring(profitTargetLong, format.mintick) + ',"qty":' + str.tostring(longQty) + ',"confluence":' + str.tostring(confluenceLong) + ',"components":"' + (longVWAPBounce ? "bounce " : "") + (longVWAPDev ? "dev " : "") + (longPOCSweep ? "poc " : "") + (longVALtoVAH ? "va_rot " : "") + (domLongBias ? "dom_agg" : "") + '","buyAggressiveness":' + str.tostring(buyAggression, "#.##") + '}', alert.freq_once_per_bar_close)
+
+if exitLong and strategy.position_size > 0
+    exitReason = (deltaDivergeLong ? "deltaDiv" : "") + (exitLongByFlip ? "flipExit" : "") + (inLunch ? "lunchClose" : "")
+    strategy.close("Long", comment=exitReason)
+    alert('{"event":"ExitLong","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, format.mintick) + ',"reason":"' + exitReason + '","deltaDiverge":' + str.tostring(deltaDivergeLong) + ',"flipCounter":' + str.tostring(flipCounterLong) + '}', alert.freq_once_per_bar_close)
+
+if shortEntry and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short, qty=shortQty, comment="ShortEntry")
+    strategy.exit("ShortExit", from_entry="Short", stop=shortStop, limit=profitTargetShort)
+    alert('{"event":"ShortEntry","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, format.mintick) + ',"stop":' + str.tostring(shortStop, format.mintick) + ',"target":' + str.tostring(profitTargetShort, format.mintick) + ',"qty":' + str.tostring(shortQty) + ',"confluence":' + str.tostring(confluenceShort) + ',"components":"' + (shortVWAPBounce ? "bounce " : "") + (shortVWAPDev ? "dev " : "") + (shortPOCSweep ? "poc " : "") + (shortVAHtoVAL ? "va_rot " : "") + (domShortBias ? "dom_agg" : "") + '","sellAggressiveness":' + str.tostring(sellAggression, "#.##") + '}', alert.freq_once_per_bar_close)
+
+if exitShort and strategy.position_size < 0
+    exitReason = (deltaDivergeShort ? "deltaDiv" : "") + (exitShortByFlip ? "flipExit" : "") + (inLunch ? "lunchClose" : "")
+    strategy.close("Short", comment=exitReason)
+    alert('{"event":"ExitShort","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, format.mintick) + ',"reason":"' + exitReason + '","deltaDiverge":' + str.tostring(deltaDivergeShort) + ',"flipCounter":' + str.tostring(flipCounterShort) + '}', alert.freq_once_per_bar_close)
+
+// --- Plot overlays -----------------------------------------------------------
+plot(sessionVWAP, title="Session VWAP", color=color.blue, linewidth=2)
+plot(vwapUpper, title="VWAP +σ", color=color.new(color.blue, 80))
+plot(vwapLower, title="VWAP -σ", color=color.new(color.blue, 80))
+plot(sessionPOC, title="Session POC", color=color.orange, linewidth=2)
+plot(sessionVAH, title="Session VAH", color=color.green, linewidth=2)
+plot(sessionVAL, title="Session VAL", color=color.red, linewidth=2)
+plot(pdh, title="Previous Day High", color=color.gray, linewidth=1)
+plot(pdl, title="Previous Day Low", color=color.gray, linewidth=1)
+
+// background shading for session state
+bgcolor(inSession ? (inPM ? color.new(color.teal, 90) : inLunch ? color.new(color.yellow, 90) : color.new(color.green, 95)) : na)
+
+// --- Labels for alerts and structural data ----------------------------------
+var label infoLbl = na
+if barstate.islast
+    label.delete(infoLbl)
+    infoLbl := label.new(bar_index, high, "POC:" + str.tostring(sessionPOC, format.price) + " VAH:" + str.tostring(sessionVAH, format.price) + " VAL:" + str.tostring(sessionVAL, format.price), xloc=xloc.bar_index, yloc=yloc.price, color=color.new(color.black, 90), textcolor=color.white, style=label.style_label_left)
+
+// --- End of script ----------------------------------------------------------
