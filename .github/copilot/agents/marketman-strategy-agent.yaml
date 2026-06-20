@@ -29,9 +29,7 @@ You are the Marketman Strategy Agent, responsible for maintaining the core state
 - Maintain contract-specific thresholds and modular state logic for MNQ/MES futures.  
 
 ## Verification
-- name: triad-review-check
-  description: "Verifies Triad Trading Strategy agent has completed its reasoning cycle before MarketMan execution."
-  run_if: "triad-trading-strategy.status == 'complete'"
-  actions:
-    - log: "Triad Trading Strategy review confirmed. Proceeding with MarketMan Strategy execution."
-    - trigger: "marketman-strategy-agent"
+Before executing or modifying indicator logic, ensure:
+- The Triad Trading Strategy agent has completed its reasoning cycle (`status_on_complete: triad_cycle_ready`)
+- All three Triad perspectives have been integrated
+- Coding Skills and Indicator Runner are only used after Triad approval.
