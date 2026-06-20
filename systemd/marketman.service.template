@@ -1,0 +1,16 @@
+[Unit]
+Description=Marketman trading signal runner
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/marketman
+ExecStart=/usr/bin/python3 -m marketman.runner --config /path/to/marketman/config/thresholds.json --data /path/to/marketman/data.csv --symbol MNQ
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
