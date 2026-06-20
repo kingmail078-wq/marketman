@@ -1,10 +1,12 @@
+inherits: [ponytail-lazy-senior-dev]
+agents:
+  - triad-trading-strategy
+  - ponytail-lazy-senior-dev
 name: Marketman Strategy Agent
 description: >
   Maintains the 5-state intraday trading engine for MNQ/MES futures.
   Ensures the system follows the Sweep → BOS → Retrace → Confirmation → Entry sequence.
   Keeps contract-specific thresholds and the 3-pillar confirmation system intact.
-agents:
-  - ponytail-lazy-senior-dev
 
 instructions: |
   - Maintain the 5-state model:

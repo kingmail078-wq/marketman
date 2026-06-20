@@ -1,9 +1,10 @@
+inherits: [ponytail-lazy-senior-dev]
+agents:
+  - ponytail-lazy-senior-dev
 name: Marketman Risk Engine Agent
 description: >
   Implements and maintains the evaluation-account risk model for Lucid Trading.
   Ensures safe position sizing, daily loss limits, and trailing drawdown compliance.
-agents:
-  - ponytail-lazy-senior-dev
 
 instructions: |
   - Enforce 1% risk per trade unless user specifies otherwise.

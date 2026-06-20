@@ -1,4 +1,9 @@
----
+---inherits: [triad-trading-strategy]
+agents:
+  - triad-trading-strategy
+  ## Constraints
+- DO NOT generate indicator code unless Triad Trading Strategy agent has completed its review.
+- Require Devil’s Advocate, Professional Analyst, and Emotion Analyst outputs before finalizing.
 inherits: [ponytail-lazy-senior-dev]
 description: "Indicator Runner agent that validates and updates trading indicator logic using all available agent inputs and continuous strategy values."
 tools: [read, search, edit]
