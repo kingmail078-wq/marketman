@@ -1,0 +1,7 @@
+[
+  {
+    "index": 28,
+    "signal": "SELL",
+    "reason": "VWAP+POC+VA confluence (score=4):     ; Price at VAH/VWAP-upper; RSI=100 > 55; session=PM."
+  }
+]

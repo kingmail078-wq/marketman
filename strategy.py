@@ -634,6 +634,7 @@ def generate_signals(candles: List[Candle], book: Optional[BookSnapshot] = None,
             price_at_vwap_upper,
             current_rsi,
             book_short,
+            book_short,
             session_phase_open,
             session_phase_pm,
         )

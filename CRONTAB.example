@@ -1,0 +1,11 @@
+# Marketman Crontab Example
+# Add these lines to your crontab to run Marketman automatically
+
+# Every 5 minutes during trading hours (9:30 AM - 4:00 PM ET)
+*/5 9-16 * * 1-5 /workspaces/marketman/scripts/run-signals.sh >> /workspaces/marketman/logs/cron.log 2>&1
+
+# Daily cleanup (remove logs older than 30 days)
+0 0 * * * find /workspaces/marketman/logs -name "signals_*.json" -mtime +30 -delete
+
+# To install: crontab -e
+# Then paste the above lines and save
